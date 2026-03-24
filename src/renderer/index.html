@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self';
+               script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net;
+               worker-src 'self' blob: https://cdn.jsdelivr.net;
+               style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com;
+               font-src 'self' https://fonts.gstatic.com data:;
+               img-src 'self' data: https:;
+               connect-src 'self' https://api.anthropic.com https://api.openai.com https://generativelanguage.googleapis.com http://localhost:*;" />
+    <title>AgentOS</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+        href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=JetBrains+Mono:wght@300;400;500;600&display=swap"
+        rel="stylesheet" />
+</head>
+
+<body class="bg-carbon-975 text-carbon-100 font-body overflow-hidden">
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+</body>
+
+</html>

@@ -1,0 +1,17 @@
+node_modules/
+dist/
+release/
+.DS_Store
+*.log
+.env
+.env.local
+.env.production
+*.db
+*.db-shm
+*.db-wal
+coverage/
+.nyc_output/
+out/
+build/
+.turbo/
+*.tsbuildinfo

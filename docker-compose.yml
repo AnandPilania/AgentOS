@@ -1,0 +1,47 @@
+version: '3.9'
+
+services:
+  # ─── AgentOS Server ─────────────────────────────────────
+  agentos:
+    image: ghcr.io/agentos/agentos:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - '3000:3000'
+    environment:
+      NODE_ENV:             production
+      AGENTOS_SERVER_MODE:  '1'
+      DATABASE_URL:         /data/agentos.db
+      JWT_SECRET:           ${JWT_SECRET:-change_me_in_production}
+      PORT:                 '3000'
+      # AI Provider Keys (optional — users can also set these in the UI)
+      ANTHROPIC_API_KEY:    ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY:       ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY:       ${GEMINI_API_KEY:-}
+    volumes:
+      - agentos_data:/data
+      - agentos_workspaces:/workspaces
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:3000/health']
+      interval: 30s
+      timeout:  10s
+      retries:  3
+
+  # ─── Nginx reverse proxy ────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - agentos
+    restart: unless-stopped
+
+volumes:
+  agentos_data:
+  agentos_workspaces:

@@ -1,0 +1,160 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── CSS Variables ─────────────────────────────── */
+:root {
+  --color-void:    #6355fa;
+  --color-plasma:  #ff26c5;
+  --color-bg:      #0a0b0d;
+  --color-surface: #111317;
+  --color-border:  rgba(255,255,255,0.07);
+  --color-text:    #e2e3e6;
+  --color-muted:   #636874;
+  --radius-panel:  12px;
+  --font-mono:     'JetBrains Mono', monospace;
+  --font-display:  'Syne', sans-serif;
+  --font-body:     'DM Sans', sans-serif;
+}
+
+/* ─── Base ──────────────────────────────────────── */
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-body);
+  user-select: none;
+}
+
+/* Selectable text in editors/terminals */
+.selectable { user-select: text; }
+
+/* ─── Scrollbar ─────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.1);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+
+/* ─── Panel ─────────────────────────────────────── */
+.panel {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+}
+
+.panel-header {
+  border-bottom: 1px solid var(--color-border);
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+
+/* ─── Agent Status Colors ───────────────────────── */
+.status-idle    { color: #636874; }
+.status-running { color: #00ff88; }
+.status-paused  { color: #ffdd00; }
+.status-done    { color: #6355fa; }
+.status-error   { color: #ff3355; }
+.status-waiting { color: #00aaff; }
+
+.status-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.status-dot.running  { background: #00ff88; box-shadow: 0 0 6px #00ff88; animation: pulse 1.5s infinite; }
+.status-dot.idle     { background: #636874; }
+.status-dot.paused   { background: #ffdd00; }
+.status-dot.done     { background: #6355fa; }
+.status-dot.error    { background: #ff3355; box-shadow: 0 0 6px #ff3355; }
+.status-dot.waiting  { background: #00aaff; }
+
+/* ─── Void Glow ─────────────────────────────────── */
+.glow-void  { box-shadow: 0 0 20px rgba(99,85,250,0.3); }
+.glow-plasma{ box-shadow: 0 0 20px rgba(255,38,197,0.3); }
+
+/* ─── Drag Region (macOS) ────────────────────────── */
+.drag-region { -webkit-app-region: drag; }
+.no-drag     { -webkit-app-region: no-drag; }
+
+/* ─── Monaco Editor ─────────────────────────────── */
+.monaco-editor .margin { background: #111317 !important; }
+.monaco-editor-background { background: #111317 !important; }
+
+/* ─── xterm.js ──────────────────────────────────── */
+.xterm { height: 100%; padding: 8px; }
+.xterm-viewport { overflow-y: auto !important; }
+
+/* ─── React Flow ────────────────────────────────── */
+.react-flow__background { background: #0a0b0d; }
+.react-flow__edge-path  { stroke: rgba(99,85,250,0.6); }
+.react-flow__node       { font-family: var(--font-body); }
+
+/* ─── Animations ────────────────────────────────── */
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.5; transform: scale(0.85); }
+}
+
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position:  200% 0; }
+}
+
+.shimmer {
+  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.05) 50%, transparent 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+/* ─── Typography ────────────────────────────────── */
+.font-display { font-family: var(--font-display); }
+.font-mono    { font-family: var(--font-mono); }
+
+/* ─── Custom Focus ──────────────────────────────── */
+.focus-void:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(99,85,250,0.5);
+}
+
+/* ─── Resize Handle ─────────────────────────────── */
+.resize-handle {
+  position: absolute;
+  background: transparent;
+  transition: background 0.15s;
+  z-index: 10;
+}
+.resize-handle:hover,
+.resize-handle.resizing { background: rgba(99,85,250,0.4); }
+
+.resize-handle-x {
+  width: 4px; top: 0; bottom: 0;
+  cursor: ew-resize;
+}
+.resize-handle-y {
+  height: 4px; left: 0; right: 0;
+  cursor: ns-resize;
+}
+
+/* v2 additions */
+.status-dot.queued { background: #ff7700; }

@@ -1,0 +1,17 @@
+export const IPC = {
+  AGENT:     { CREATE:'agent:create', DESTROY:'agent:destroy', LIST:'agent:list', GET:'agent:get', START:'agent:start', STOP:'agent:stop', PAUSE:'agent:pause', SEND_MESSAGE:'agent:send-message', GET_MESSAGES:'agent:get-messages', STATUS_CHANGE:'agent:status-change', MESSAGE_CHUNK:'agent:message-chunk', TOOL_CALL:'agent:tool-call', CLONE:'agent:clone' },
+  WORKSPACE: { CREATE:'workspace:create', DELETE:'workspace:delete', LIST:'workspace:list', GET:'workspace:get', DIFF:'workspace:diff', COMMIT:'workspace:commit', FILES:'workspace:files', READ_FILE:'workspace:read-file', WRITE_FILE:'workspace:write-file', CLONE_REPO:'workspace:clone-repo', BRANCH_LIST:'workspace:branch-list', CHECKOUT:'workspace:checkout' },
+  TERMINAL:  { CREATE:'terminal:create', DESTROY:'terminal:destroy', INPUT:'terminal:input', OUTPUT:'terminal:output', RESIZE:'terminal:resize', LIST:'terminal:list' },
+  AUTH:      { LOGIN:'auth:login', LOGOUT:'auth:logout', REGISTER:'auth:register', ME:'auth:me', UPDATE_PREFS:'auth:update-prefs' },
+  MCP:       { LIST:'mcp:list', ADD:'mcp:add', REMOVE:'mcp:remove', CONNECT:'mcp:connect', DISCONNECT:'mcp:disconnect', CALL_TOOL:'mcp:call-tool', SERVER_UPDATE:'mcp:server-update' },
+  SESSION:   { LIST:'sessions:list', CREATE:'sessions:create', GET:'sessions:get', UPDATE:'sessions:update', DELETE:'sessions:delete', TOUCH:'sessions:touch', BUILD_PANES:'sessions:build-panes' },
+  TEMPLATES: { LIST:'templates:list', GET:'templates:get', SEARCH:'templates:search', INSTALL:'templates:install' },
+  COST:      { SUMMARY:'cost:summary', LIST:'cost:list' },
+  SEARCH:    { QUERY:'search:query' },
+  PIPELINE:  { LIST:'pipeline:list', CREATE:'pipeline:create', RUN:'pipeline:run', STOP:'pipeline:stop' },
+  SETTINGS:  { GET:'settings:get', SET:'settings:set', RESET:'settings:reset', EXPORT:'settings:export', IMPORT:'settings:import' },
+  PROVIDERS: { LIST:'providers:list', TEST:'providers:test', SAVE:'providers:save', MODELS:'providers:models' },
+  AUDIT:     { LIST:'audit:list', EXPORT:'audit:export' },
+  APP:       { VERSION:'app:version', CHECK_UPDATE:'app:check-update', INSTALL_UPDATE:'app:install-update', OPEN_EXTERNAL:'app:open-external', SHOW_DIALOG:'app:show-dialog', NOTIFY:'app:notify' },
+  COLLAB:    { PRESENCE:'collab:presence', EVENT:'collab:event' },
+} as const
