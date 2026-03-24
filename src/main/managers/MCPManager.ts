@@ -1,6 +1,7 @@
 import { v4 as uuid } from 'uuid'
 import { spawn, ChildProcess } from 'child_process'
 import { EventEmitter } from 'eventemitter3'
+import fs from 'fs'
 import type { MCPServer, MCPTool, MCPResource } from '../../shared/types'
 import { logger } from '../utils/logger'
 
@@ -157,7 +158,9 @@ function resolveCommand(cmd: string): string {
                 { encoding: 'utf8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'] }
             ).trim().split('\n')[0].trim()
             if (result) return result
-        } catch { }
+        } catch {
+            //
+        }
     }
 
     // Fallback: check common locations
@@ -175,9 +178,11 @@ function resolveCommand(cmd: string): string {
 
     for (const p of commonPaths) {
         try {
-            require('fs').accessSync(p, require('fs').constants.X_OK)
+            fs.accessSync(p, fs.constants.X_OK)
             return p
-        } catch { }
+        } catch {
+            //
+        }
     }
 
     return cmd // Return as-is and let spawn fail with a clear message

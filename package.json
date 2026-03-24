@@ -20,6 +20,7 @@
         "dist:linux": "npm run build && electron-builder --linux",
         "dist:all": "npm run build && electron-builder -mwl",
         "lint": "eslint src --ext .ts,.tsx",
+        "lint:fix": "eslint src --ext .ts,.tsx --fix",
         "typecheck": "tsc -p tsconfig.main.json --noEmit && echo 'Main OK'",
         "test": "cross-env NODE_ENV=test jest --coverage",
         "rebuild": "npx electron-rebuild"
@@ -122,6 +123,8 @@
                     ]
                 }
             ],
+            "identity": null,
+            "gatekeeperAssess": false,
             "icon": "assets/icons/icon.icns",
             "hardenedRuntime": true,
             "entitlements": "build/entitlements.mac.plist",
@@ -137,7 +140,8 @@
                     ]
                 }
             ],
-            "icon": "assets/icons/icon.ico"
+            "icon": "assets/icons/icon.ico",
+            "certificateFile": null
         },
         "linux": {
             "target": [

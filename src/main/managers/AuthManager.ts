@@ -77,7 +77,7 @@ export class AuthManager {
   async loginOrCreateSSO(profile: {
     email: string; name: string; provider: AuthProvider; providerId: string
   }): Promise<LoginResult> {
-    let row = this.db.get<Record<string, string>>('SELECT * FROM users WHERE email = ?', [profile.email])
+    const row = this.db.get<Record<string, string>>('SELECT * FROM users WHERE email = ?', [profile.email])
 
     if (!row) {
       const now = new Date().toISOString()
