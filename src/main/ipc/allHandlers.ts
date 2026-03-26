@@ -8,7 +8,11 @@ import type { AuditManager } from '../managers/AuditManager'
 import type { MCPManager } from '../managers/MCPManager'
 import type { SessionManager } from '../managers/SessionManager'
 import type { TemplateManager } from '../managers/TemplateManager'
+import { registerTeamHandlers } from './teamHandlers'
 import { app, shell, dialog, Notification } from 'electron'
+import { TeamManager } from '../managers/TeamManager'
+import { WorkspaceContextManager } from '../managers/WorkspaceContextManager'
+import { PipelineManager } from '../managers/PipelineManager'
 
 export function registerAllHandlers(
     ipc: IpcMain,
@@ -23,6 +27,9 @@ export function registerAllHandlers(
     sessions: SessionManager,
     templates: TemplateManager,
     db: import('../managers/DatabaseManager').DatabaseManager,
+    teams: TeamManager,
+    context: WorkspaceContextManager,
+    pipelines: PipelineManager
 ): void {
 
     agents.setWindow(win)
@@ -184,4 +191,7 @@ export function registerAllHandlers(
     ipc.handle('app:open-external', (_, url) => shell.openExternal(url))
     ipc.handle('app:show-dialog', (_, o) => dialog.showOpenDialog(win, o))
     ipc.handle('app:notify', (_, d) => { if (Notification.isSupported()) new Notification({ title: d.title, body: d.body }).show(); return true })
+
+    // - Team -
+    registerTeamHandlers(ipc, win!, teams!, context!, workspaces)
 }

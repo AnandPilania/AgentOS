@@ -13,6 +13,8 @@ import { SessionManager } from './managers/SessionManager'
 import { TemplateManager } from './managers/TemplateManager'
 import { PipelineManager } from './managers/PipelineManager'
 import { CollabManager } from './managers/CollabManager'
+import { TeamManager } from './managers/TeamManager'
+import { WorkspaceContextManager } from './managers/WorkspaceContextManager'
 import { registerAllHandlers } from './ipc/allHandlers'
 import { logger } from './utils/logger'
 
@@ -30,6 +32,8 @@ let sessions: SessionManager
 let templates: TemplateManager
 let pipelines: PipelineManager
 let collab: CollabManager
+let teams: TeamManager
+let context: WorkspaceContextManager
 
 async function initManagers(): Promise<void> {
     const userDataPath = app.getPath('userData')
@@ -46,6 +50,8 @@ async function initManagers(): Promise<void> {
     templates = new TemplateManager(db)
     pipelines = new PipelineManager(db, agents)
     collab = new CollabManager()
+    context = new WorkspaceContextManager(settings, userDataPath)
+    teams = new TeamManager(db, agents, context)
 
     // Auto-connect saved MCP servers that were enabled
     const savedMCP = db.all<Record<string, string>>('SELECT * FROM mcp_servers WHERE enabled = 1')
@@ -158,7 +164,7 @@ app.whenReady().then(async () => {
         agents, workspaces, terminals,
         auth, settings, audit,
         mcp, sessions, templates,
-        db,
+        db, teams, context, pipelines
     )
 
     setupAutoUpdater()

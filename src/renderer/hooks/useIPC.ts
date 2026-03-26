@@ -124,6 +124,24 @@ export const ipc = {
         onDownloadProgress: (cb: (...a: unknown[]) => void) => on('app:download-progress', cb),
         onUpdateDownloaded: (cb: (...a: unknown[]) => void) => on('app:update-downloaded', cb),
     },
+
+    teams: {
+        list: (d?: { sessionId?: string }) => invoke('team:list', d),
+        get: (id: string) => invoke('team:get', id),
+        delete: (id: string) => invoke('team:delete', id),
+        createAgents: (d: unknown) => invoke('team:create-agents', d),
+        run: (teamId: string, task: string) => invoke('team:run', { teamId, task }),
+        stopRun: (runId: string) => invoke('team:stop-run', runId),
+        listRuns: (teamId: string) => invoke('team:list-runs', teamId),
+        getRun: (runId: string) => invoke('team:get-run', runId),
+    },
+    context: {
+        index: (workspaceId: string) => invoke('context:index', { workspaceId }),
+        search: (workspaceId: string, query: string, topK?: number) =>
+            invoke('context:search', { workspaceId, query, topK }),
+        stats: (workspaceId: string) => invoke('context:stats', workspaceId),
+        clear: (workspaceId: string) => invoke('context:clear', workspaceId),
+    },
 }
 
 export function isElectron(): boolean {

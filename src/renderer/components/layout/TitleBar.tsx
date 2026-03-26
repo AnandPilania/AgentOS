@@ -4,6 +4,7 @@ import { ipc } from '../../hooks/useIPC'
 import { PanelLeft, PanelRight, Terminal, GitBranch, Diff, Network, MessageSquare, Settings, Plus, Search, PlugZap, DollarSign, Sparkles, LogOut, GitMerge } from 'lucide-react'
 import type { ActivePanel } from '../../store'
 import AnimatedLogo from '../Logo'
+import { Users } from 'lucide-react'
 
 const isMac = ipc.platform === 'darwin'
 
@@ -22,6 +23,7 @@ export function TitleBar() {
     { id:'mcp',       icon:<PlugZap size={12}/>,       label:'MCP' },
     { id:'cost',      icon:<DollarSign size={12}/>,    label:'Cost' },
     { id:'templates', icon:<Sparkles size={12}/>,      label:'Templates' },
+     { id:'team', icon:<Users size={12}/>, label:'Team' },
   ]
 
   return (

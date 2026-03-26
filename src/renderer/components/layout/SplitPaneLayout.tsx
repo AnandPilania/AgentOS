@@ -1,5 +1,4 @@
-import React, { useCallback, useRef, useState } from 'react'
-import { motion } from 'framer-motion'
+import React, { useCallback, useState } from 'react'
 import { useStore } from '../../store'
 const uuid = () => crypto.randomUUID()
 import { ChatPanel }     from '../chat/ChatPanel'
@@ -14,10 +13,11 @@ import { TemplatesPanel }from '../agents/TemplatesPanel'
 import {
   LayoutTemplate, Columns2, Grid2X2, Maximize2,
   Bot, Terminal, GitCompare, Network, FolderOpen,
-  ChevronDown, Plus, X
+  ChevronDown
 } from 'lucide-react'
-import type { ActivePanel, SidebarTab } from '../../store'
+import type { ActivePanel } from '../../store'
 import type { Pane, PaneLayout } from '../../../shared/types'
+import { TeamPanel } from '../team/TeamPanel'
 
 const PANEL_COMPONENTS: Record<ActivePanel, React.ComponentType<{paneId?:string}>> = {
   chat:      ChatPanel,
@@ -29,6 +29,7 @@ const PANEL_COMPONENTS: Record<ActivePanel, React.ComponentType<{paneId?:string}
   cost:      CostPanel,
   templates: TemplatesPanel,
   pipeline:  PipelinePanel,
+  team: TeamPanel,
 }
 
 const LAYOUT_PRESETS: { id: PaneLayout; label: string; icon: React.ReactNode; cols: number; rows: number }[] = [
