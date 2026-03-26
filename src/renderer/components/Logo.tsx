@@ -7,9 +7,9 @@ interface AnimatedLogoProps extends React.SVGProps<SVGSVGElement> {
 }
 
 const AnimatedLogo: React.FC<AnimatedLogoProps> = ({
-  size = 64, // Slightly larger default to show off the animation
+  size = 64,
   primaryColor = "#6355fa",
-  title = "Animated Company Logo",
+  title = "AgentOS",
   ...props
 }) => {
   const id = React.useId();
