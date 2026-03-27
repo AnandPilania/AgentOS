@@ -407,21 +407,20 @@ export class AgentManager extends EventEmitter {
     private async runOllamaTurn(
         agent: Agent,
         history: AgentMessage[],
-        tools: AnthropicToolDef[],
+        tools: AnthropicToolDef[],      // was _tools
         baseUrl: string,
-        wsPath?: string,
+        wsPath?: string,                // was _wsPath
     ): Promise<void> {
-        // Build messages array
         const messages: Array<{
             role: string; content: string
             tool_calls?: unknown[]; tool_call_id?: string
         }> = []
+
         if (agent.prompt) messages.push({ role: 'system', content: agent.prompt })
         for (const m of history.filter(x => x.role === 'user' || x.role === 'assistant')) {
             messages.push({ role: m.role, content: m.content })
         }
 
-        // Ollama uses the same function-calling format as OpenAI
         const ollamaTools = tools.length > 0
             ? tools.map(t => ({
                 type: 'function',
@@ -441,12 +440,7 @@ export class AgentManager extends EventEmitter {
                 resp = await fetch(`${baseUrl}/api/chat`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        model: agent.model,
-                        messages,
-                        tools: ollamaTools,
-                        stream: true,
-                    }),
+                    body: JSON.stringify({ model: agent.model, messages, tools: ollamaTools, stream: true }),
                 })
             } catch (err) {
                 throw new Error(
@@ -473,14 +467,12 @@ export class AgentManager extends EventEmitter {
 
                     const msg = j.message as Record<string, unknown> | undefined
 
-                    // Text fragment
                     const txt = msg?.content
                     if (typeof txt === 'string' && txt) {
                         fullText += txt
                         this.push('agent:message-chunk', { agentId: agent.id, chunk: txt, msgId, done: false })
                     }
 
-                    // Tool calls — Ollama emits these in the message object (not deltas)
                     const rawTCs = msg?.tool_calls as Array<Record<string, unknown>> | undefined
                     if (rawTCs?.length) {
                         rawTCs.forEach((tc, idx) => {
@@ -503,7 +495,6 @@ export class AgentManager extends EventEmitter {
 
             const callsList = Object.values(tcAccum)
 
-            // Persist text
             if (fullText.trim()) {
                 const am: AgentMessage = {
                     id: uuid(), agentId: agent.id, role: 'assistant',
@@ -517,12 +508,13 @@ export class AgentManager extends EventEmitter {
             if (callsList.length === 0) {
                 looping = false
             } else {
-                // Execute tools and collect results
                 const toolResults: Array<{ role: string; tool_call_id: string; content: string }> = []
 
                 for (const tc of callsList) {
                     let parsed: Record<string, unknown> = {}
-                    try { parsed = JSON.parse(tc.arguments || '{}') } catch { }
+                    try { parsed = JSON.parse(tc.arguments || '{}') } catch {
+                        //
+                    }
 
                     const tcEvent: ToolCall = {
                         id: tc.id, name: tc.name, input: parsed,
@@ -541,7 +533,7 @@ export class AgentManager extends EventEmitter {
                                 {
                                     workspacePath: wsPath ?? '',
                                     agentId: agent.id,
-                                    onProgress: (m) => this.push('agent:tool-progress', { agentId: agent.id, message: m }),
+                                    onProgress: m => this.push('agent:tool-progress', { agentId: agent.id, message: m }),
                                 },
                             )
                             resultStr = r.output
@@ -549,8 +541,7 @@ export class AgentManager extends EventEmitter {
                         tcEvent.status = 'done'; tcEvent.endedAt = new Date().toISOString()
                     } catch (err) {
                         resultStr = `Error: ${err instanceof Error ? err.message : String(err)}`
-                        tcEvent.status = 'error'; tcEvent.endedAt = new Date().toISOString()
-                        tcEvent.error = resultStr
+                        tcEvent.status = 'error'; tcEvent.endedAt = new Date().toISOString(); tcEvent.error = resultStr
                     }
 
                     this.push('agent:tool-call', { agentId: agent.id, toolCall: tcEvent })
@@ -558,7 +549,6 @@ export class AgentManager extends EventEmitter {
                     toolResults.push({ role: 'tool', tool_call_id: tc.id, content: resultStr })
                 }
 
-                // Push assistant tool-call message + tool results into context
                 messages.push({
                     role: 'assistant', content: '',
                     tool_calls: callsList.map(tc => ({

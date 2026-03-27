@@ -236,10 +236,10 @@ export interface TerminalSession {
 }
 
 export type TeamRole = 'leader' | 'analyst' | 'developer' | 'qa'
-
+export type LeaderAction = 'answer' | 'analyst' | 'developer' | 'qa' | 'done'
 export type TeamRunStatus =
-    | 'idle' | 'planning' | 'analyzing' | 'developing'
-    | 'reviewing' | 'done' | 'error' | 'max_retries'
+    | 'idle' | 'leader_thinking' | 'analyst_working' | 'developer_working'
+    | 'qa_working' | 'done' | 'error' | 'max_steps'
 
 export interface TeamMemberConfig {
     role: TeamRole
@@ -255,41 +255,50 @@ export interface TeamConfig {
     workspaceId: string
     sessionId: string
     members: TeamMemberConfig[]
-    maxRetries: number
+    maxSteps: number
     createdAt: string
     updatedAt: string
 }
 
-export interface ParsedDefect {
-    id: string
-    severity: 'critical' | 'major' | 'minor'
-    description: string
-    file?: string
-    line?: number
+export interface FileDiffSummary {
+    filesChanged: string[]
+    additions: number
+    deletions: number
+    rawDiff: string
 }
 
-export interface TeamCycleRecord {
-    cycle: number
-    leaderPlan: string
-    analystOutput: string
-    devOutput: string
-    qaOutput: string
-    qaPassed: boolean
-    defects: ParsedDefect[]
+export interface LeaderDecision {
+    nextAction: LeaderAction
+    reasoning: string
+    instruction?: string
+    answer?: string
+}
+
+export interface TeamMessage {
+    id: string
+    role: 'user' | 'leader' | 'analyst' | 'developer' | 'qa' | 'system'
+    content: string
+    streaming: boolean
     timestamp: string
+    fileDiff?: FileDiffSummary
+    leaderDecision?: LeaderDecision
 }
 
 export interface TeamRun {
     id: string
     teamId: string
-    task: string
+    userMessage: string
     status: TeamRunStatus
-    cycle: number
-    maxRetries: number
+    steps: number
+    maxSteps: number
     startedAt: string
     endedAt?: string
     error?: string
-    history: TeamCycleRecord[]
-    lastQaOutput?: string
-    qaPassedAt?: number
+    messages: TeamMessage[]
+    contextFiles: string[]
+}
+
+export interface TeamConversation {
+    teamId: string
+    messages: Array<{ role: string; content: string; timestamp: string }>
 }

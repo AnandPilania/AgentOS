@@ -193,5 +193,5 @@ export function registerAllHandlers(
     ipc.handle('app:notify', (_, d) => { if (Notification.isSupported()) new Notification({ title: d.title, body: d.body }).show(); return true })
 
     // - Team -
-    registerTeamHandlers(ipc, win!, teams!, context!, workspaces)
+    registerTeamHandlers(ipc, win!, teams, context, workspaces)
 }

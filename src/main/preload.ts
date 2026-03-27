@@ -82,18 +82,31 @@ contextBridge.exposeInMainWorld('agentos', {
     teams: {
         list: (d?: { sessionId?: string }) => invoke('team:list', d),
         get: (id: string) => invoke('team:get', id),
+        update: (id: string, patch: unknown) => invoke('team:update', { id, patch }),
         delete: (id: string) => invoke('team:delete', id),
         createAgents: (d: unknown) => invoke('team:create-agents', d),
-        run: (teamId: string, task: string) => invoke('team:run', { teamId, task }),
+        send: (teamId: string, message: string, contextFiles?: string[]) =>
+            invoke('team:send', { teamId, message, contextFiles }),
         stopRun: (runId: string) => invoke('team:stop-run', runId),
         listRuns: (teamId: string) => invoke('team:list-runs', teamId),
         getRun: (runId: string) => invoke('team:get-run', runId),
+        getConversation: (teamId: string) => invoke('team:get-conversation', teamId),
+        clearHistory: (teamId: string) => invoke('team:clear-history', teamId),
     },
     context: {
-        index: (workspaceId: string) => invoke('context:index', { workspaceId }),
+        index: (workspaceId: string, force?: boolean) =>
+            invoke('context:index', { workspaceId, force }),
         search: (workspaceId: string, query: string, topK?: number) =>
             invoke('context:search', { workspaceId, query, topK }),
         stats: (workspaceId: string) => invoke('context:stats', workspaceId),
         clear: (workspaceId: string) => invoke('context:clear', workspaceId),
+    },
+    ws: {
+        tree: (workspaceId: string, maxDepth?: number) =>
+            invoke('ws:tree', { workspaceId, maxDepth }),
+        readFile: (workspaceId: string, relPath: string) =>
+            invoke('ws:read-file', { workspaceId, relPath }),
+        searchFiles: (workspaceId: string, pattern: string) =>
+            invoke('ws:search-files', { workspaceId, pattern }),
     },
 })

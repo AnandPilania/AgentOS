@@ -1,13 +1,20 @@
 /**
- * Multi-agent team orchestration.
+ * Leader-centric graph orchestration:
  *
- * Design:
- *  • Team Leader owns the task. It plans once, reviews every cycle, and
- *    the loop only exits when QA says APPROVE.
- *  • sendToAgent() awaits the FULL tool-use turn via 'turn:done' /
- *    'turn:error' events emitted by the patched AgentManager.
- *  • Works with Anthropic, OpenAI, Gemini, Ollama (kimi-k2, llama3.1,
- *    deepseek, qwen2.5-coder, phi4, etc.)
+ *   User message
+ *        ↓
+ *    [Leader] ← always entry point, always exit point
+ *        ↓ decides next_action
+ *   ┌──────────────────────────────┐
+ *   │  "answer"   → reply directly │
+ *   │  "done"     → task complete  │
+ *   │  "analyst"  → Analyst, then  │
+ *   │  "developer"→ Developer,then │  back to Leader with result
+ *   │  "qa"       → QA, then       │
+ *   └──────────────────────────────┘
+ *
+ * The leader is the ONLY decision-maker.
+ * Other roles are contractors — they do one job and hand back.
  */
 
 import { v4 as uuid } from 'uuid'
@@ -18,12 +25,14 @@ import type { DatabaseManager } from './DatabaseManager'
 import type { WorkspaceContextManager } from './WorkspaceContextManager'
 import { logger } from '../utils/logger'
 
-// ─── Public types ──────────────────────────────────────────────────────────
+// ─── Types ─────────────────────────────────────────────────────────────────
 export type TeamRole = 'leader' | 'analyst' | 'developer' | 'qa'
+export type LeaderAction = 'answer' | 'analyst' | 'developer' | 'qa' | 'done'
+export type StepStatus = 'pending' | 'running' | 'done' | 'error'
 
 export type TeamRunStatus =
-    | 'idle' | 'planning' | 'analyzing' | 'developing'
-    | 'reviewing' | 'done' | 'error' | 'max_retries'
+    | 'idle' | 'leader_thinking' | 'analyst_working' | 'developer_working'
+    | 'qa_working' | 'done' | 'error' | 'max_steps'
 
 export interface TeamMemberConfig {
     role: TeamRole
@@ -39,132 +48,149 @@ export interface TeamConfig {
     workspaceId: string
     sessionId: string
     members: TeamMemberConfig[]
-    maxRetries: number
+    maxSteps: number          // max leader→delegate cycles (default 12)
     createdAt: string
     updatedAt: string
 }
 
+// One message in the team conversation log
+export interface TeamMessage {
+    id: string
+    role: 'user' | 'leader' | 'analyst' | 'developer' | 'qa' | 'system'
+    content: string           // streaming buffer while in-progress
+    streaming: boolean
+    timestamp: string
+    // If role=developer, the diff captured after their turn
+    fileDiff?: FileDiffSummary
+    // Parsed leader decision (only when role=leader)
+    leaderDecision?: LeaderDecision
+}
+
+export interface FileDiffSummary {
+    filesChanged: string[]
+    additions: number
+    deletions: number
+    rawDiff: string           // truncated git diff output
+}
+
+export interface LeaderDecision {
+    nextAction: LeaderAction
+    reasoning: string         // why the leader chose this action
+    instruction?: string      // what to tell the next agent
+    answer?: string           // direct answer if nextAction=answer
+}
+
+// A single run = one user message + the full agent graph execution
 export interface TeamRun {
     id: string
     teamId: string
-    task: string
+    userMessage: string
     status: TeamRunStatus
-    cycle: number
-    maxRetries: number
+    steps: number             // how many leader→delegate cycles happened
+    maxSteps: number
     startedAt: string
     endedAt?: string
     error?: string
-    history: TeamCycleRecord[]
-    lastQaOutput?: string
-    qaPassedAt?: number
+    messages: TeamMessage[]   // full conversation including streaming
+    contextFiles: string[]    // which files were used as context
 }
 
-export interface TeamCycleRecord {
-    cycle: number
-    leaderPlan: string
-    analystOutput: string
-    devOutput: string
-    qaOutput: string
-    qaPassed: boolean
-    defects: ParsedDefect[]
-    timestamp: string
-}
-
-export interface ParsedDefect {
-    id: string
-    severity: 'critical' | 'major' | 'minor'
-    description: string
-    file?: string
-    line?: number
+// Team-level conversation history (persisted, reused across runs)
+export interface TeamConversation {
+    teamId: string
+    messages: Array<{ role: string; content: string; timestamp: string }>
 }
 
 // ─── Role tools ────────────────────────────────────────────────────────────
 const ROLE_TOOLS: Record<TeamRole, BuiltinTool[]> = {
     leader: ['read_file', 'list_files', 'search_code'],
     analyst: ['read_file', 'list_files', 'search_code', 'grep'],
-    developer: ['read_file', 'write_file', 'list_files', 'bash', 'search_code',
-        'grep', 'git_status', 'git_diff', 'git_commit'],
-    qa: ['read_file', 'list_files', 'bash', 'search_code', 'grep',
-        'git_status', 'git_diff'],
+    developer: ['read_file', 'write_file', 'list_files', 'bash',
+        'search_code', 'grep', 'git_status', 'git_diff', 'git_commit'],
+    qa: ['read_file', 'list_files', 'bash', 'search_code',
+        'grep', 'git_status', 'git_diff'],
 }
 
-// ─── Role system prompts ───────────────────────────────────────────────────
-const ROLE_PROMPTS: Record<TeamRole, string> = {
-    leader: `You are the Team Leader AI. You own this task end-to-end.
+// ─── System prompts ────────────────────────────────────────────────────────
+const LEADER_SYSTEM = `You are the Team Leader AI. You are the central decision-maker for this team.
 
-Responsibilities:
-- Decompose the task into clear sub-tasks for each role
-- Define measurable acceptance criteria
-- After each QA cycle, acknowledge defects and guide the next attempt
+TEAM MEMBERS you can delegate to:
+- analyst: understands requirements, identifies edge cases, writes specs
+- developer: reads and writes code, runs bash, modifies files
+- qa: reads code, runs tests, reports defects
 
-ALWAYS respond with ONLY valid JSON, no markdown fences, no prose outside JSON.
+YOUR DECISION PROCESS:
+1. Read the user's message and conversation history carefully
+2. Decide what to do next
+3. Respond ONLY with valid JSON — no prose, no markdown fences
 
-Output schema:
+OUTPUT SCHEMA:
 {
-  "plan": {
-    "objective": "<one sentence>",
-    "acceptance_criteria": ["<testable criterion>", ...],
-    "analyst_task": "<exact instructions for the analyst>",
-    "developer_task": "<exact instructions, which files to create/modify>",
-    "qa_task": "<what to test, what commands to run>",
-    "context_hints": ["<relevant existing files or patterns>"]
-  }
-}`,
+  "reasoning": "<1-3 sentences explaining your decision>",
+  "next_action": "answer" | "analyst" | "developer" | "qa" | "done",
+  "instruction": "<precise task for the chosen agent, or empty if answer/done>",
+  "answer": "<your direct response to the user, only when next_action is answer>"
+}
 
-    analyst: `You are the Business Analyst AI. You receive instructions from the Team Leader.
+ROUTING RULES:
+- "answer" — simple questions, greetings, clarifications, anything you can answer directly
+- "analyst" — before development when requirements need clarification
+- "developer" — when code needs to be written, modified, or debugged
+- "qa" — after developer makes changes, to verify correctness
+- "done" — when the task is fully complete and verified
 
-Responsibilities:
-- Translate leader instructions into detailed technical requirements
-- Identify edge cases and constraints
-- Define test scenarios for QA
+IMPORTANT: You will be called multiple times in a single task. Each time you receive
+the outputs from the previous agent. Decide whether the task is done or if another
+agent is needed. You ALWAYS have the final say.`
 
-ALWAYS respond with ONLY valid JSON, no markdown fences.
+const ANALYST_SYSTEM = `You are the Business Analyst AI. You receive precise instructions from the Team Leader.
 
-Output schema:
+Your job: Translate the leader's instruction into structured requirements.
+Read existing code using read_file to understand current patterns.
+
+ALWAYS respond with ONLY valid JSON, no markdown fences:
 {
   "requirements": {
     "functional": ["<requirement>", ...],
-    "non_functional": ["<perf/security/etc>", ...],
+    "non_functional": ["<perf/security>", ...],
     "edge_cases": ["<edge case>", ...],
     "test_scenarios": [
-      { "scenario": "<name>", "steps": "<how>", "expected": "<result>" }
-    ]
-  }
-}`,
+      { "scenario": "<desc>", "steps": "<how to test>", "expected": "<result>" }
+    ],
+    "existing_patterns": ["<pattern observed in code>", ...]
+  },
+  "summary": "<2 sentence summary for the developer>"
+}`
 
-    developer: `You are the Developer AI. You receive a plan and requirements.
+const DEVELOPER_SYSTEM = `You are the Developer AI. You receive precise instructions from the Team Leader.
 
-Rules:
+MANDATORY RULES:
 1. Use read_file on EVERY file before modifying it — no exceptions
-2. Match existing code style exactly
+2. Match existing code style exactly — read the file first
 3. Use bash to run tests/lint after changes
-4. Implement only what is described — no scope creep
+4. Report EVERY file you changed, created, or deleted
 
-ALWAYS respond with ONLY valid JSON after completing work.
-
-Output schema:
+ALWAYS respond with ONLY valid JSON after completing your work:
 {
   "implementation": {
     "files_modified": ["<path>", ...],
     "files_created": ["<path>", ...],
     "files_deleted": ["<path>", ...],
-    "summary": "<2-3 sentences>",
-    "commands_run": ["<command output snippet>", ...],
+    "summary": "<what was implemented>",
+    "commands_run": ["<command and its output>", ...],
     "known_issues": ["<anything incomplete>"]
   }
-}`,
+}`
 
-    qa: `You are the QA Engineer AI. You verify the implementation against the plan.
+const QA_SYSTEM = `You are the QA Engineer AI. You receive precise instructions from the Team Leader.
 
-Rules:
-1. Use read_file on every file in the implementation report
-2. Check each acceptance criterion against the actual code
-3. Run tests with bash
-4. Set "passed": true ONLY when every criterion is satisfied and tests pass
+MANDATORY RULES:
+1. Use read_file on every file listed in the implementation report
+2. Run tests with bash — never skip this
+3. Verify each stated requirement against actual code
+4. Set "passed" true ONLY when you have verified every criterion
 
-ALWAYS respond with ONLY valid JSON, no markdown fences.
-
-Output schema:
+ALWAYS respond with ONLY valid JSON:
 {
   "qa_report": {
     "passed": <true|false>,
@@ -173,22 +199,30 @@ Output schema:
     ],
     "defects": [
       {
-        "id": "<short-id>",
+        "id": "<id>",
         "severity": "critical|major|minor",
-        "description": "<clear problem statement>",
+        "description": "<problem>",
         "file": "<path or null>",
         "line": <number or null>
       }
     ],
-    "test_output": "<raw output or 'no tests found'>",
+    "test_output": "<raw output>",
     "recommendation": "APPROVE|REWORK"
   }
-}`,
+}`
+
+const ROLE_SYSTEMS: Record<TeamRole, string> = {
+    leader: LEADER_SYSTEM,
+    analyst: ANALYST_SYSTEM,
+    developer: DEVELOPER_SYSTEM,
+    qa: QA_SYSTEM,
 }
 
 // ─── TeamManager ───────────────────────────────────────────────────────────
 export class TeamManager extends EventEmitter {
     private abortControllers = new Map<string, AbortController>()
+    // In-memory conversation histories per team (persisted to DB)
+    private conversations = new Map<string, TeamConversation>()
 
     constructor(
         private db: DatabaseManager,
@@ -207,44 +241,55 @@ export class TeamManager extends EventEmitter {
       workspace_id TEXT NOT NULL,
       session_id   TEXT NOT NULL,
       members      TEXT NOT NULL DEFAULT '[]',
-      max_retries  INTEGER NOT NULL DEFAULT 3,
+      max_steps    INTEGER NOT NULL DEFAULT 12,
       created_at   TEXT NOT NULL,
       updated_at   TEXT NOT NULL
     )`)
         this.db.run(`CREATE TABLE IF NOT EXISTS team_runs (
-      id             TEXT PRIMARY KEY,
-      team_id        TEXT NOT NULL,
-      task           TEXT NOT NULL,
-      status         TEXT NOT NULL DEFAULT 'idle',
-      cycle          INTEGER NOT NULL DEFAULT 0,
-      max_retries    INTEGER NOT NULL DEFAULT 3,
-      started_at     TEXT NOT NULL,
-      ended_at       TEXT,
-      error          TEXT,
-      history        TEXT NOT NULL DEFAULT '[]',
-      last_qa_output TEXT,
-      qa_passed_at   INTEGER
+      id           TEXT PRIMARY KEY,
+      team_id      TEXT NOT NULL,
+      user_message TEXT NOT NULL,
+      status       TEXT NOT NULL DEFAULT 'idle',
+      steps        INTEGER NOT NULL DEFAULT 0,
+      max_steps    INTEGER NOT NULL DEFAULT 12,
+      started_at   TEXT NOT NULL,
+      ended_at     TEXT,
+      error        TEXT,
+      messages     TEXT NOT NULL DEFAULT '[]',
+      context_files TEXT NOT NULL DEFAULT '[]'
+    )`)
+        this.db.run(`CREATE TABLE IF NOT EXISTS team_conversations (
+      team_id  TEXT PRIMARY KEY,
+      messages TEXT NOT NULL DEFAULT '[]',
+      updated_at TEXT NOT NULL
     )`)
     }
 
-    // ─── CRUD ─────────────────────────────────────────────────────────────────
+    // ─── Team CRUD ─────────────────────────────────────────────────────────────
     createTeam(data: {
         name: string; workspaceId: string; sessionId: string
-        members: TeamMemberConfig[]; maxRetries?: number
+        members: TeamMemberConfig[]; maxSteps?: number
     }): TeamConfig {
         const now = new Date().toISOString()
         const t: TeamConfig = {
             id: uuid(), name: data.name, workspaceId: data.workspaceId,
             sessionId: data.sessionId, members: data.members,
-            maxRetries: data.maxRetries ?? 3, createdAt: now, updatedAt: now,
+            maxSteps: data.maxSteps ?? 12, createdAt: now, updatedAt: now,
         }
         this.db.run(
-            `INSERT INTO teams (id,name,workspace_id,session_id,members,max_retries,created_at,updated_at)
+            `INSERT INTO teams (id,name,workspace_id,session_id,members,max_steps,created_at,updated_at)
        VALUES (?,?,?,?,?,?,?,?)`,
             [t.id, t.name, t.workspaceId, t.sessionId,
-            JSON.stringify(t.members), t.maxRetries, now, now],
+            JSON.stringify(t.members), t.maxSteps, now, now],
         )
         return t
+    }
+
+    updateTeam(id: string, patch: Partial<Pick<TeamConfig, 'name' | 'maxSteps' | 'members'>>): void {
+        const now = new Date().toISOString()
+        if (patch.name !== undefined) this.db.run('UPDATE teams SET name=?,updated_at=? WHERE id=?', [patch.name, now, id])
+        if (patch.maxSteps !== undefined) this.db.run('UPDATE teams SET max_steps=?,updated_at=? WHERE id=?', [patch.maxSteps, now, id])
+        if (patch.members !== undefined) this.db.run('UPDATE teams SET members=?,updated_at=? WHERE id=?', [JSON.stringify(patch.members), now, id])
     }
 
     getTeam(id: string): TeamConfig | undefined {
@@ -261,9 +306,12 @@ export class TeamManager extends EventEmitter {
 
     deleteTeam(id: string): void {
         this.db.run('DELETE FROM team_runs WHERE team_id = ?', [id])
+        this.db.run('DELETE FROM team_conversations WHERE team_id = ?', [id])
         this.db.run('DELETE FROM teams WHERE id = ?', [id])
+        this.conversations.delete(id)
     }
 
+    // ─── Runs ─────────────────────────────────────────────────────────────────
     getRun(id: string): TeamRun | undefined {
         const r = this.db.get<Record<string, string>>('SELECT * FROM team_runs WHERE id = ?', [id])
         return r ? this.toRun(r) : undefined
@@ -271,29 +319,60 @@ export class TeamManager extends EventEmitter {
 
     listRuns(teamId: string): TeamRun[] {
         return this.db.all<Record<string, string>>(
-            'SELECT * FROM team_runs WHERE team_id = ? ORDER BY started_at DESC LIMIT 30',
+            'SELECT * FROM team_runs WHERE team_id = ? ORDER BY started_at DESC LIMIT 50',
             [teamId],
         ).map(r => this.toRun(r))
     }
 
-    // ─── Agent factory ────────────────────────────────────────────────────────
+    clearHistory(teamId: string): void {
+        this.conversations.delete(teamId)
+        this.db.run('DELETE FROM team_conversations WHERE team_id = ?', [teamId])
+    }
+
+    // ─── Conversation history ─────────────────────────────────────────────────
+    getConversation(teamId: string): TeamConversation {
+        if (this.conversations.has(teamId)) return this.conversations.get(teamId)!
+        const r = this.db.get<{ messages: string }>('SELECT messages FROM team_conversations WHERE team_id = ?', [teamId])
+        const conv: TeamConversation = {
+            teamId,
+            messages: r ? JSON.parse(r.messages) : [],
+        }
+        this.conversations.set(teamId, conv)
+        return conv
+    }
+
+    private saveConversation(conv: TeamConversation): void {
+        const now = new Date().toISOString()
+        const exists = this.db.get('SELECT team_id FROM team_conversations WHERE team_id = ?', [conv.teamId])
+        if (exists) {
+            this.db.run('UPDATE team_conversations SET messages=?,updated_at=? WHERE team_id=?',
+                [JSON.stringify(conv.messages), now, conv.teamId])
+        } else {
+            this.db.run('INSERT INTO team_conversations (team_id,messages,updated_at) VALUES (?,?,?)',
+                [conv.teamId, JSON.stringify(conv.messages), now])
+        }
+    }
+
+    // ─── Agent factory ─────────────────────────────────────────────────────────
     async createTeamAgents(params: {
         name: string; workspaceId: string; sessionId: string
-        provider: string; model: string; leaderModel?: string; maxRetries?: number
+        provider: string; model: string; leaderModel?: string; maxSteps?: number
     }): Promise<TeamConfig> {
         const members: TeamMemberConfig[] = []
+        const roleNames: Record<TeamRole, string> = {
+            leader: 'Team Leader', analyst: 'Business Analyst',
+            developer: 'Developer', qa: 'QA Engineer',
+        }
+
         for (const role of ['leader', 'analyst', 'developer', 'qa'] as TeamRole[]) {
             const model = (role === 'leader' && params.leaderModel) ? params.leaderModel : params.model
             const agent = await this.agents.create({
-                name: {
-                    leader: 'Team Leader', analyst: 'Business Analyst',
-                    developer: 'Developer', qa: 'QA Engineer'
-                }[role],
+                name: roleNames[role],
                 provider: params.provider as import('../../shared/types').AIProvider,
                 model,
                 workspaceId: params.workspaceId,
                 sessionId: params.sessionId,
-                prompt: ROLE_PROMPTS[role],
+                prompt: ROLE_SYSTEMS[role],
                 tools: ROLE_TOOLS[role],
                 tags: ['team', role],
             })
@@ -302,37 +381,59 @@ export class TeamManager extends EventEmitter {
 
         const team = this.createTeam({
             name: params.name, workspaceId: params.workspaceId,
-            sessionId: params.sessionId, members, maxRetries: params.maxRetries ?? 3,
+            sessionId: params.sessionId, members, maxSteps: params.maxSteps ?? 12,
         })
 
-        // Background index — don't block
+        // Index ONCE at creation. Never auto-re-index.
         const wsPath = await this.workspacePath(team.workspaceId)
-        if (wsPath) this.context.indexWorkspace(team.workspaceId, wsPath).catch(() => { })
+        if (wsPath && !this.context.getStats(team.workspaceId)) {
+            this.context.indexWorkspace(team.workspaceId, wsPath).catch(e =>
+                logger.warn(`[Team] Background index failed: ${e}`)
+            )
+        }
 
         return team
     }
 
-    // ─── Run ──────────────────────────────────────────────────────────────────
-    async runTeam(teamId: string, task: string): Promise<TeamRun> {
+    // ─── Main entry: send a message to the team ───────────────────────────────
+    async sendMessage(
+        teamId: string,
+        userMessage: string,
+        contextFiles?: string[],   // optional: specific files to include in context
+    ): Promise<TeamRun> {
         const team = this.getTeam(teamId)
         if (!team) throw new Error(`Team ${teamId} not found`)
 
         const run: TeamRun = {
-            id: uuid(), teamId, task, status: 'idle',
-            cycle: 0, maxRetries: team.maxRetries,
-            startedAt: new Date().toISOString(), history: [],
+            id: uuid(), teamId, userMessage, status: 'idle', steps: 0,
+            maxSteps: team.maxSteps, startedAt: new Date().toISOString(),
+            messages: [], contextFiles: contextFiles ?? [],
         }
-        this.save(run)
+        this.saveRun(run)
 
         const ctrl = new AbortController()
         this.abortControllers.set(run.id, ctrl)
 
-        // Fire without await — IPC returns the initial run object immediately
-        this.loop(team, run, ctrl.signal).catch(err => {
-            run.status = 'error'
-            run.error = err instanceof Error ? err.message : String(err)
+        // Add user message to conversation history
+        const conv = this.getConversation(teamId)
+        conv.messages.push({ role: 'user', content: userMessage, timestamp: run.startedAt })
+        this.saveConversation(conv)
+
+        // Append user message to run
+        const userMsg: TeamMessage = {
+            id: uuid(), role: 'user', content: userMessage,
+            streaming: false, timestamp: run.startedAt,
+        }
+        run.messages.push(userMsg)
+        this.emit('run:message', { runId: run.id, message: userMsg })
+
+        // Fire async loop
+        this.leaderLoop(team, run, conv, ctrl.signal).catch(err => {
+            const msg = err instanceof Error ? err.message : String(err)
+            logger.error(`[Team] Run ${run.id} error: ${msg}`)
+            run.status = 'error'; run.error = msg
             run.endedAt = new Date().toISOString()
-            this.save(run)
+            this.saveRun(run)
             this.abortControllers.delete(run.id)
             this.emit('run:end', run)
         })
@@ -344,129 +445,196 @@ export class TeamManager extends EventEmitter {
         this.abortControllers.get(runId)?.abort()
         this.abortControllers.delete(runId)
         const run = this.getRun(runId)
-        if (run && !['done', 'error', 'max_retries'].includes(run.status)) {
+        if (run && !['done', 'error', 'max_steps'].includes(run.status)) {
             run.status = 'error'; run.error = 'Stopped by user'
             run.endedAt = new Date().toISOString()
-            this.save(run); this.emit('run:end', run)
+            this.saveRun(run); this.emit('run:end', run)
         }
     }
 
-    // ─── The loop ─────────────────────────────────────────────────────────────
-    private async loop(team: TeamConfig, run: TeamRun, signal: AbortSignal): Promise<void> {
-        this.requireRoles(team)
-        const m = (role: TeamRole) => team.members.find(x => x.role === role)!
+    // ─── Leader-centric loop ──────────────────────────────────────────────────
+    //
+    // The leader is called in a loop. Each iteration:
+    //  1. Build context for leader (history + last agent output + workspace ctx)
+    //  2. Call leader → get LeaderDecision JSON
+    //  3. If next_action=answer or done → end
+    //  4. Otherwise → call the designated agent → pass output back to leader
+    //  5. Repeat
+    //
+    private async leaderLoop(
+        team: TeamConfig,
+        run: TeamRun,
+        conv: TeamConversation,
+        signal: AbortSignal,
+    ): Promise<void> {
+        const leader = team.members.find(m => m.role === 'leader')!
+        const analyst = team.members.find(m => m.role === 'analyst')
+        const developer = team.members.find(m => m.role === 'developer')
+        const qa = team.members.find(m => m.role === 'qa')
 
-        // RAG context — fetched once, reused every cycle
-        const wsCtx = await this.context.getContextSummary(team.workspaceId, run.task)
-
-        // ── Leader plans (once) ────────────────────────────────────────────────
-        this.status(run, 'planning'); this.emit('run:start', run)
-
-        const leaderPlan = await this.call(
-            m('leader').agentId,
-            `You are the Team Leader. You own this task completely.\n\n` +
-            `TASK:\n${run.task}\n\n` +
-            `WORKSPACE CONTEXT:\n${wsCtx}\n\n` +
-            `Create a detailed plan. Respond ONLY with valid JSON.`,
-            signal,
+        // Get workspace context (uses index if available, doesn't rebuild)
+        const wsCtx = await this.context.getContextSummary(
+            team.workspaceId,
+            run.userMessage,
+            run.contextFiles.length > 0 ? run.contextFiles : undefined,
         )
 
-        let defects: ParsedDefect[] = []
-        let passed = false
+        let lastAgentOutput = ''   // output from most recent delegated agent
+        let lastAgentRole: TeamRole | null = null
 
-        // ── Retry loop ─────────────────────────────────────────────────────────
-        while (!passed && run.cycle < team.maxRetries) {
+        while (run.steps < team.maxSteps) {
             if (signal.aborted) throw new Error('Stopped')
-            run.cycle++
-            this.save(run)
-            this.emit('run:cycle', { runId: run.id, cycle: run.cycle })
+            run.steps++
 
-            // Analyst
-            this.status(run, 'analyzing')
-            const analystOut = await this.call(
-                m('analyst').agentId,
-                buildAnalystPrompt(leaderPlan, wsCtx, defects, run.cycle),
-                signal,
+            // ── Build leader prompt ──────────────────────────────────────────────
+            const leaderPrompt = buildLeaderPrompt(
+                run.userMessage,
+                conv.messages.slice(-20),   // last 20 messages for context window
+                wsCtx,
+                lastAgentRole,
+                lastAgentOutput,
             )
 
-            // Developer
-            this.status(run, 'developing')
-            const devOut = await this.call(
-                m('developer').agentId,
-                buildDevPrompt(leaderPlan, analystOut, defects, run.cycle),
-                signal,
+            // ── Call leader ───────────────────────────────────────────────────────
+            this.setStatus(run, 'leader_thinking')
+            const leaderRaw = await this.callAgent(
+                leader.agentId, leaderPrompt, run.id, 'leader', signal,
             )
 
-            // QA
-            this.status(run, 'reviewing')
-            const qaOut = await this.call(
-                m('qa').agentId,
-                buildQAPrompt(leaderPlan, analystOut, devOut),
-                signal,
-            )
+            const decision = parseLeaderDecision(leaderRaw)
 
-            const qa = parseQA(qaOut)
-            passed = qa.passed
-            defects = qa.defects
-            run.lastQaOutput = qaOut
-            if (passed) run.qaPassedAt = run.cycle
+            // Append leader message to run
+            const leaderMsg: TeamMessage = {
+                id: uuid(), role: 'leader', content: leaderRaw,
+                streaming: false, timestamp: new Date().toISOString(),
+                leaderDecision: decision,
+            }
+            run.messages.push(leaderMsg)
+            this.saveRun(run)
+            this.emit('run:message', { runId: run.id, message: leaderMsg })
 
-            // Leader reviews the cycle (best-effort, non-blocking)
-            if (!passed && run.cycle < team.maxRetries) {
-                this.call(
-                    m('leader').agentId,
-                    `Cycle ${run.cycle} QA FAILED.\n\nDefects:\n` +
-                    defects.map(d => `[${d.severity}] ${d.description}`).join('\n') +
-                    `\n\nAcknowledge and state what the next cycle must prioritize.\n` +
-                    `Respond with JSON: { "review": { "acknowledged": true, "priority": "<key fix>" } }`,
-                    signal,
-                ).catch(() => { })
+            // ── Handle leader decision ─────────────────────────────────────────
+            if (decision.nextAction === 'answer') {
+                // Leader answers directly — no agents needed
+                const answer = decision.answer ?? decision.reasoning
+                const answerMsg: TeamMessage = {
+                    id: uuid(), role: 'leader', content: answer,
+                    streaming: false, timestamp: new Date().toISOString(),
+                }
+                run.messages.push(answerMsg)
+                conv.messages.push({ role: 'assistant', content: answer, timestamp: answerMsg.timestamp })
+                this.saveConversation(conv)
+                this.saveRun(run)
+                this.emit('run:message', { runId: run.id, message: answerMsg })
+                break
             }
 
-            const record: TeamCycleRecord = {
-                cycle: run.cycle, leaderPlan, analystOutput: analystOut,
-                devOutput: devOut, qaOutput: qaOut, qaPassed: passed,
-                defects, timestamp: new Date().toISOString(),
+            if (decision.nextAction === 'done') {
+                conv.messages.push({ role: 'assistant', content: decision.reasoning, timestamp: new Date().toISOString() })
+                this.saveConversation(conv)
+                break
             }
-            run.history.push(record)
-            this.save(run)
-            this.emit('run:cycle:complete', { runId: run.id, cycle: run.cycle, passed, defects })
+
+            // ── Delegate to a specialist ─────────────────────────────────────────
+            const roleMap: Record<TeamRole, TeamMemberConfig | undefined> = {
+                analyst,
+                developer,
+                qa,
+                leader
+            }
+            const targetRole = decision.nextAction as TeamRole
+            const targetMember = roleMap[targetRole]
+
+            if (!targetMember) {
+                logger.warn(`[Team] Leader wanted ${targetRole} but not in team, ending`)
+                break
+            }
+
+            const statusMap: Record<string, TeamRunStatus> = {
+                analyst: 'analyst_working', developer: 'developer_working', qa: 'qa_working',
+            }
+            this.setStatus(run, statusMap[targetRole] as TeamRunStatus)
+
+            const agentPrompt = buildDelegatePrompt(
+                targetRole,
+                decision.instruction ?? run.userMessage,
+                conv.messages.slice(-10),
+                wsCtx,
+            )
+
+            const agentRaw = await this.callAgent(
+                targetMember.agentId, agentPrompt, run.id, targetRole, signal,
+            )
+
+            // For developer: capture git diff
+            let fileDiff: FileDiffSummary | undefined
+            if (targetRole === 'developer') {
+                fileDiff = await this.captureGitDiff(team.workspaceId)
+            }
+
+            const agentMsg: TeamMessage = {
+                id: uuid(), role: targetRole, content: agentRaw,
+                streaming: false, timestamp: new Date().toISOString(),
+                fileDiff,
+            }
+            run.messages.push(agentMsg)
+            conv.messages.push({ role: targetRole, content: agentRaw, timestamp: agentMsg.timestamp })
+            this.saveConversation(conv)
+            this.saveRun(run)
+            this.emit('run:message', { runId: run.id, message: agentMsg })
+
+            lastAgentOutput = agentRaw
+            lastAgentRole = targetRole
         }
 
-        // ── Finish ────────────────────────────────────────────────────────────
-        run.status = passed ? 'done' : 'max_retries'
+        // ── Finish ───────────────────────────────────────────────────────────────
+        if (run.steps >= team.maxSteps && !['done', 'error'].includes(run.status)) {
+            run.status = 'max_steps'
+            run.error = `Reached max steps (${team.maxSteps})`
+        } else {
+            run.status = 'done'
+        }
         run.endedAt = new Date().toISOString()
-        if (!passed) {
-            run.error = `QA did not pass after ${team.maxRetries} retries.\n` +
-                defects.map(d => `[${d.severity}] ${d.description}`).join('\n')
-        }
-        this.save(run)
+        this.saveRun(run)
         this.abortControllers.delete(run.id)
         this.emit('run:end', run)
-        logger.info(`[Team] Run ${run.id}: ${run.status} after ${run.cycle} cycle(s)`)
+        logger.info(`[Team] Run ${run.id} ended: ${run.status} (${run.steps} steps)`)
     }
 
-    // ─── Core: await a complete agent turn ────────────────────────────────────
+    // ─── Call agent and await full turn ──────────────────────────────────────
     //
-    // WHY this approach:
-    //   AgentManager.sendMessage() fires runWithRetry() WITHOUT await and returns
-    //   immediately. The actual work (provider API calls + tool loops) runs in the
-    //   background. runAgentTurn()'s finally block sets status='idle' AND emits
-    //   'turn:done'. We register listeners BEFORE calling sendMessage() so we
-    //   can never miss the event.
+    // Registers turn:done / turn:error BEFORE sendMessage() to avoid race.
+    // Emits streaming chunks in real-time via run:chunk events.
     //
-    private call(agentId: string, message: string, signal: AbortSignal): Promise<string> {
+    private callAgent(
+        agentId: string,
+        message: string,
+        runId: string,
+        role: TeamRole,
+        signal: AbortSignal,
+    ): Promise<string> {
         return new Promise((resolve, reject) => {
             if (signal.aborted) { reject(new Error('Stopped')); return }
 
             let done = false
-            const TIMEOUT = 5 * 60_000  // 5 min
+            const TIMEOUT = 5 * 60_000
+
+            // Track streaming for this run so UI can show live thinking
+            const onChunk = (d: unknown) => {
+                const x = d as { agentId: string; chunk?: string; msgId?: string }
+                if (x.agentId !== agentId) return
+                if (x.chunk) {
+                    this.emit('run:chunk', { runId, role, chunk: x.chunk })
+                }
+            }
 
             const cleanup = () => {
                 clearTimeout(timer)
                 this.agents.off('turn:done', onDone)
                 this.agents.off('turn:error', onErr)
                 signal.removeEventListener('abort', onAbort)
+                // Remove chunk listener via the window push mechanism — we can't
+                // directly unlisten push, but it's filtered by agentId so OK
             }
 
             const onDone = (id: string) => {
@@ -492,10 +660,9 @@ export class TeamManager extends EventEmitter {
             const timer = setTimeout(() => {
                 if (done) return
                 done = true; cleanup()
-                reject(new Error(`Agent ${agentId} timed out after ${TIMEOUT / 1000}s`))
+                reject(new Error(`Agent ${agentId} timed out`))
             }, TIMEOUT)
 
-            // Attach BEFORE calling sendMessage
             this.agents.on('turn:done', onDone)
             this.agents.on('turn:error', onErr)
             signal.addEventListener('abort', onAbort)
@@ -508,17 +675,47 @@ export class TeamManager extends EventEmitter {
         })
     }
 
-    // ─── Helpers ──────────────────────────────────────────────────────────────
-    private status(run: TeamRun, s: TeamRunStatus): void {
-        run.status = s; this.save(run)
-        this.emit('run:status', { runId: run.id, status: s })
+    // ─── Git diff capture ─────────────────────────────────────────────────────
+    private async captureGitDiff(workspaceId: string): Promise<FileDiffSummary | undefined> {
+        try {
+            const wsPath = await this.workspacePath(workspaceId)
+            if (!wsPath) return undefined
+
+            const { execFile } = await import('child_process')
+            const { promisify } = await import('util')
+            const exec = promisify(execFile)
+
+            const [statusResult, diffResult] = await Promise.all([
+                exec('git', ['diff', '--stat', 'HEAD'], { cwd: wsPath, timeout: 10_000 }).catch(() => ({ stdout: '' })),
+                exec('git', ['diff', 'HEAD'], { cwd: wsPath, timeout: 10_000 }).catch(() => ({ stdout: '' })),
+            ])
+
+            const stat = statusResult.stdout?.trim() ?? ''
+            const rawDiff = diffResult.stdout?.trim() ?? ''
+            if (!stat && !rawDiff) return undefined
+
+            // Parse stat summary: "3 files changed, 42 insertions(+), 8 deletions(-)"
+            const filesMatch = stat.match(/(\d+) files? changed/)
+            const addMatch = stat.match(/(\d+) insertions?\(\+\)/)
+            const delMatch = stat.match(/(\d+) deletions?\(-\)/)
+
+            const changedFiles = [...stat.matchAll(/^\s*(.+)\s*\|/mg)].map(m => m[1].trim())
+
+            return {
+                filesChanged: changedFiles.filter(Boolean),
+                additions: addMatch ? parseInt(addMatch[1]) : 0,
+                deletions: delMatch ? parseInt(delMatch[1]) : 0,
+                rawDiff: rawDiff.slice(0, 8000),  // cap at 8KB
+            }
+        } catch {
+            return undefined
+        }
     }
 
-    private requireRoles(team: TeamConfig): void {
-        for (const r of ['leader', 'analyst', 'developer', 'qa'] as TeamRole[]) {
-            if (!team.members.find(m => m.role === r))
-                throw new Error(`Team ${team.id} missing role: ${r}`)
-        }
+    // ─── Helpers ──────────────────────────────────────────────────────────────
+    private setStatus(run: TeamRun, status: TeamRunStatus): void {
+        run.status = status; this.saveRun(run)
+        this.emit('run:status', { runId: run.id, status })
     }
 
     private async workspacePath(id: string): Promise<string | null> {
@@ -526,25 +723,22 @@ export class TeamManager extends EventEmitter {
         return r?.path ?? null
     }
 
-    private save(run: TeamRun): void {
+    private saveRun(run: TeamRun): void {
         const exists = this.db.get('SELECT id FROM team_runs WHERE id = ?', [run.id])
+        const msgsJson = JSON.stringify(run.messages)
+        const ctxJson = JSON.stringify(run.contextFiles)
         if (exists) {
             this.db.run(
-                `UPDATE team_runs SET status=?,cycle=?,ended_at=?,error=?,
-         history=?,last_qa_output=?,qa_passed_at=? WHERE id=?`,
-                [run.status, run.cycle, run.endedAt ?? null, run.error ?? null,
-                JSON.stringify(run.history), run.lastQaOutput ?? null,
-                run.qaPassedAt ?? null, run.id],
+                `UPDATE team_runs SET status=?,steps=?,ended_at=?,error=?,messages=?,context_files=? WHERE id=?`,
+                [run.status, run.steps, run.endedAt ?? null, run.error ?? null, msgsJson, ctxJson, run.id],
             )
         } else {
             this.db.run(
                 `INSERT INTO team_runs
-         (id,team_id,task,status,cycle,max_retries,started_at,ended_at,error,
-          history,last_qa_output,qa_passed_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-                [run.id, run.teamId, run.task, run.status, run.cycle, run.maxRetries,
-                run.startedAt, run.endedAt ?? null, run.error ?? null,
-                JSON.stringify(run.history), run.lastQaOutput ?? null, run.qaPassedAt ?? null],
+         (id,team_id,user_message,status,steps,max_steps,started_at,ended_at,error,messages,context_files)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+                [run.id, run.teamId, run.userMessage, run.status, run.steps, run.maxSteps,
+                run.startedAt, run.endedAt ?? null, run.error ?? null, msgsJson, ctxJson],
             )
         }
     }
@@ -552,88 +746,83 @@ export class TeamManager extends EventEmitter {
     private toTeam(r: Record<string, string>): TeamConfig {
         return {
             id: r.id, name: r.name, workspaceId: r.workspace_id, sessionId: r.session_id,
-            members: JSON.parse(r.members ?? '[]'), maxRetries: Number(r.max_retries ?? 3),
+            members: JSON.parse(r.members ?? '[]'), maxSteps: Number(r.max_steps ?? 12),
             createdAt: r.created_at, updatedAt: r.updated_at,
         }
     }
 
     private toRun(r: Record<string, string>): TeamRun {
         return {
-            id: r.id, teamId: r.team_id, task: r.task, status: r.status as TeamRunStatus,
-            cycle: Number(r.cycle ?? 0), maxRetries: Number(r.max_retries ?? 3),
-            startedAt: r.started_at, endedAt: r.ended_at ?? undefined, error: r.error ?? undefined,
-            history: JSON.parse(r.history ?? '[]'), lastQaOutput: r.last_qa_output ?? undefined,
-            qaPassedAt: r.qa_passed_at ? Number(r.qa_passed_at) : undefined,
+            id: r.id, teamId: r.team_id, userMessage: r.user_message,
+            status: r.status as TeamRunStatus, steps: Number(r.steps ?? 0),
+            maxSteps: Number(r.max_steps ?? 12), startedAt: r.started_at,
+            endedAt: r.ended_at ?? undefined, error: r.error ?? undefined,
+            messages: JSON.parse(r.messages ?? '[]'),
+            contextFiles: JSON.parse(r.context_files ?? '[]'),
         }
     }
 }
 
-// ─── Prompt builders (pure functions) ─────────────────────────────────────
-function buildAnalystPrompt(
-    leaderPlan: string, wsCtx: string, defects: ParsedDefect[], cycle: number,
+// ─── Prompt builders ───────────────────────────────────────────────────────
+function buildLeaderPrompt(
+    userMessage: string,
+    history: Array<{ role: string; content: string; timestamp: string }>,
+    wsCtx: string,
+    lastRole: TeamRole | null,
+    lastOutput: string,
 ): string {
-    const defSec = defects.length
-        ? `\nDEFECTS FROM PREVIOUS CYCLE:\n${defects.map(d =>
-            `  [${d.severity}] ${d.description}${d.file ? ` — ${d.file}` : ''}`).join('\n')}\n`
+    const historyText = history.length > 1
+        ? `CONVERSATION HISTORY (last ${history.length} messages):\n` +
+        history.slice(0, -1).map(m => `[${m.role}]: ${m.content.slice(0, 400)}`).join('\n') +
+        '\n\n'
         : ''
-    return `You are the Business Analyst. Cycle ${cycle}.\n\n` +
-        `LEADER PLAN:\n${leaderPlan}\n` +
-        defSec +
+
+    const agentResultText = lastRole && lastOutput
+        ? `RESULT FROM ${lastRole.toUpperCase()}:\n${lastOutput.slice(0, 3000)}\n\n`
+        : ''
+
+    return `${historyText}USER MESSAGE: ${userMessage}\n\n` +
         `WORKSPACE CONTEXT:\n${wsCtx}\n\n` +
-        `${cycle > 1 ? 'Focus requirements on the defects above.' : ''}\n` +
-        `Respond ONLY with valid JSON.`
+        agentResultText +
+        `Decide what to do next. Respond ONLY with valid JSON.`
 }
 
-function buildDevPrompt(
-    leaderPlan: string, analystOut: string, defects: ParsedDefect[], cycle: number,
+function buildDelegatePrompt(
+    role: TeamRole,
+    instruction: string,
+    history: Array<{ role: string; content: string; timestamp: string }>,
+    wsCtx: string,
 ): string {
-    const defSec = defects.length
-        ? `\nDEFECTS TO FIX:\n${defects.map(d =>
-            `  [${d.severity}] ${d.description}${d.file ? ` in ${d.file}` : ''}${d.line ? ` line ${d.line}` : ''}`
-        ).join('\n')}\n`
+    const historyText = history.length
+        ? `RECENT CONTEXT:\n${history.map(m => `[${m.role}]: ${m.content.slice(0, 300)}`).join('\n')}\n\n`
         : ''
-    return `You are the Developer. Cycle ${cycle}.\n\n` +
-        `LEADER PLAN:\n${leaderPlan}\n\n` +
-        `REQUIREMENTS:\n${analystOut}\n` +
-        defSec +
-        `Use read_file before modifying any file. Run bash to verify changes.\n` +
-        `Respond ONLY with valid JSON after completing your work.`
+
+    return `${historyText}YOUR TASK (from Team Leader):\n${instruction}\n\n` +
+        `WORKSPACE CONTEXT:\n${wsCtx}\n\n` +
+        `Complete your task. Respond ONLY with valid JSON.`
 }
 
-function buildQAPrompt(leaderPlan: string, analystOut: string, devOut: string): string {
-    return `You are the QA Engineer.\n\n` +
-        `LEADER PLAN (acceptance criteria):\n${leaderPlan}\n\n` +
-        `REQUIREMENTS:\n${analystOut}\n\n` +
-        `IMPLEMENTATION:\n${devOut}\n\n` +
-        `Read every modified file. Run tests. Verify every criterion.\n` +
-        `Respond ONLY with valid JSON.`
-}
-
-// ─── QA parser ────────────────────────────────────────────────────────────
-function parseQA(raw: string): { passed: boolean; defects: ParsedDefect[] } {
+// ─── Leader decision parser ────────────────────────────────────────────────
+function parseLeaderDecision(raw: string): LeaderDecision {
     try {
         const clean = raw.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim()
         const start = clean.indexOf('{')
         if (start === -1) throw new Error('no JSON')
         const obj = JSON.parse(clean.slice(start))
-        const report = obj.qa_report ?? obj
-        const passed = Boolean(report.passed)
-        const defects: ParsedDefect[] = (report.defects ?? []).map((d: Record<string, unknown>) => ({
-            id: String(d.id ?? uuid()),
-            severity: (['critical', 'major', 'minor'].includes(String(d.severity))
-                ? d.severity : 'minor') as ParsedDefect['severity'],
-            description: String(d.description ?? 'Unknown defect'),
-            file: d.file ? String(d.file) : undefined,
-            line: d.line != null ? Number(d.line) : undefined,
-        }))
-        return { passed, defects }
-    } catch (e) {
+
+        const validActions: LeaderAction[] = ['answer', 'analyst', 'developer', 'qa', 'done']
+        const nextAction = validActions.includes(obj.next_action)
+            ? obj.next_action as LeaderAction
+            : 'answer'  // safe fallback
+
         return {
-            passed: false,
-            defects: [{
-                id: uuid(), severity: 'major',
-                description: `QA output parse failed: ${String(e).slice(0, 120)}`
-            }],
+            nextAction,
+            reasoning: String(obj.reasoning ?? ''),
+            instruction: obj.instruction ? String(obj.instruction) : undefined,
+            answer: obj.answer ? String(obj.answer) : undefined,
         }
+    } catch (e) {
+        // If we can't parse the leader output, treat it as a direct answer
+        return { nextAction: 'answer', reasoning: raw, answer: raw }
     }
 }
